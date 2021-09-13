@@ -21,7 +21,7 @@ Raw images from Flickr30k can be found [here](https://forms.illinois.edu/sec/229
 `test_2017_flickr` and `test_2018_flickr` images can be downloaded from [here](https://drive.google.com/drive/folders/1kfgmYFL5kup51ET7WQNxYmKCvwz_Hjkt).
 Download the images into the `$ROOT/work/data/flickr30k-images` folder.
 
-## Image feature extraction
+## Global image feature extraction
 
 Extract global image features using ResNet50. The pre-trained model is taken from (https://download.pytorch.org/models/resnet50-0676ba61.pth).
 
@@ -36,3 +36,10 @@ python src/feats_resnet50.py --image-folder $IMAGEDIR --file-names $TEXT/image_s
 python src/feats_resnet50.py --image-folder $IMAGEDIR --file-names $TEXT/image_splits/val.txt --batch-size 256 --model-file $MODELFILE --output-prefix $FEATSDIR/valid
 python src/feats_resnet50.py --image-folder $IMAGEDIR --file-names $TEXT/image_splits/${TESTNAME}.txt --batch-size 256 --model-file $MODELFILE --output-prefix $FEATSDIR/test
 ```
+
+## Object detection image feature extraction
+
+```
+python ../fairseq-imgprep/src/feats_butd_orig.py --mode caffe --num-cpus 32 --gpus '0' --extract-mode roi_feats --min-max-boxes '10,10' --config-file ../fairseq-imgprep/external/bottom-up-attention.pytorch/configs/bua-caffe/extract-bua-caffe-r101.yaml --image-dir ../data/flickr30ks10/ --out-dir blah2 MODEL.WEIGHTS models/butd/bua-caffe-frcn-r101_with_attributes.pth MODEL.BUA.EXTRACTOR.MODE 3
+```
+

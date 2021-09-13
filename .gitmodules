@@ -4,3 +4,9 @@
 [submodule "external/apex"]
 	path = external/apex
 	url = https://github.com/NVIDIA/apex
+[submodule "external/VinVL"]
+	path = external/VinVL
+	url = https://github.com/pzzhang/VinVL
+[submodule "external/scene_graph_benchmark"]
+	path = external/scene_graph_benchmark
+	url = https://github.com/microsoft/scene_graph_benchmark

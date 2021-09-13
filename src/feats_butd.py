@@ -31,6 +31,14 @@ from models.bua.box_regression import BUABoxes
 import ray
 from ray.actor import ActorHandle
 
+import torch
+import numpy as np
+import cv2
+import os
+
+from models.bua.layers.nms import nms
+from models.bua.box_regression import BUABoxes
+
 
 def save_scores_and_roi_features(args, cfg, im_file, im, dataset_dict, boxes, scores, features_pooled, attr_scores=None):
     MIN_BOXES = cfg.MODEL.BUA.EXTRACTOR.MIN_BOXES
@@ -227,6 +235,74 @@ def extract_feat(split_idx, img_list, cfg, args, actor: ActorHandle):
         actor.update.remote(1)
 
 
+def extract_feat_local(split_idx, img_list, cfg, args):
+    num_images = len(img_list)
+    print('Number of images on split{}: {}.'.format(split_idx, num_images))
+
+    model = DefaultTrainer.build_model(cfg)
+    DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+        cfg.MODEL.WEIGHTS, resume=args.resume
+    )
+    model.eval()
+
+    for im_file in (img_list):
+        if os.path.exists(os.path.join(args.output_dir, im_file.split('.')[0]+'.npz')):
+            continue
+        im = cv2.imread(os.path.join(args.image_dir, im_file))
+        if im is None:
+            print(os.path.join(args.image_dir, im_file), "is illegal!")
+            continue
+        dataset_dict = get_image_blob(im, cfg.MODEL.PIXEL_MEAN)
+        # extract roi features
+        if cfg.MODEL.BUA.EXTRACTOR.MODE == 1:
+            attr_scores = None
+            with torch.set_grad_enabled(False):
+                if cfg.MODEL.BUA.ATTRIBUTE_ON:
+                    boxes, scores, features_pooled, attr_scores = model([dataset_dict])
+                else:
+                    boxes, scores, features_pooled = model([dataset_dict])
+            boxes = [box.tensor.cpu() for box in boxes]
+            scores = [score.cpu() for score in scores]
+            features_pooled = [feat.cpu() for feat in features_pooled]
+            if not attr_scores is None:
+                attr_scores = [attr_score.cpu() for attr_score in attr_scores]
+            generate_npz(1, 
+                args, cfg, im_file, im, dataset_dict, 
+                boxes, scores, features_pooled, attr_scores)
+        # extract bbox only
+        elif cfg.MODEL.BUA.EXTRACTOR.MODE == 2:
+            with torch.set_grad_enabled(False):
+                boxes, scores = model([dataset_dict])
+            boxes = [box.cpu() for box in boxes]
+            scores = [score.cpu() for score in scores]
+            generate_npz(2,
+                args, cfg, im_file, im, dataset_dict, 
+                boxes, scores)
+        # extract roi features by bbox
+        elif cfg.MODEL.BUA.EXTRACTOR.MODE == 3:
+            if not os.path.exists(os.path.join(args.bbox_dir, im_file.split('.')[0]+'.npz')):
+                continue
+            bbox = torch.from_numpy(np.load(os.path.join(args.bbox_dir, im_file.split('.')[0]+'.npz'))['bbox']) * dataset_dict['im_scale']
+            proposals = Instances(dataset_dict['image'].shape[-2:])
+            proposals.proposal_boxes = BUABoxes(bbox)
+            dataset_dict['proposals'] = proposals
+
+            attr_scores = None
+            with torch.set_grad_enabled(False):
+                if cfg.MODEL.BUA.ATTRIBUTE_ON:
+                    boxes, scores, features_pooled, attr_scores = model([dataset_dict])
+                else:
+                    boxes, scores, features_pooled = model([dataset_dict])
+            boxes = [box.tensor.cpu() for box in boxes]
+            scores = [score.cpu() for score in scores]
+            features_pooled = [feat.cpu() for feat in features_pooled]
+            if not attr_scores is None:
+                attr_scores = [attr_score.data.cpu() for attr_score in attr_scores]
+            generate_npz(3, 
+                args, cfg, im_file, im, dataset_dict, 
+                boxes, scores, features_pooled, attr_scores)
+
+
 def main():
     parser = argparse.ArgumentParser(description="PyTorch Object Detection2 Inference")
     parser.add_argument(
@@ -259,8 +335,11 @@ def main():
                         help='directory with images',
                         default="image")
     parser.add_argument('--bbox-dir', dest='bbox_dir',
-                        help='directory with bbox',
-                        default="bbox")
+                        help='directory with bbox')
+    parser.add_argument('--objects-vocab', dest='objects_vocab',
+                        help='file objects vocab')
+    parser.add_argument('--attributes-vocab', dest='attributes_vocab',
+                        help='file attributes vocab')
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -284,13 +363,13 @@ def main():
 
     # Load classes
     classes = [] # ['__background__']
-    with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "evaluation", 'objects_vocab.txt')) as f:
+    with open(args.objects_vocab) as f:
         for object in f.readlines():
             classes.append(object.split(',')[0].lower().strip())
 
     # Load attributes
     attributes = [] # ['__no_attribute__']
-    with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "evaluation", 'attributes_vocab.txt')) as f:
+    with open(args.attributes_vocab) as f:
         for att in f.readlines():
             attributes.append(att.split(',')[0].lower().strip())
 
@@ -303,6 +382,9 @@ def main():
     imglist = os.listdir(args.image_dir)
     num_images = len(imglist)
     print('Number of images: {}.'.format(num_images))
+
+    extract_feat_local(0, imglist, cfg, args)
+    exit()
 
     if args.num_cpus != 0:
         ray.init(num_cpus=args.num_cpus)
