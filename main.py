@@ -50,7 +50,7 @@ def preprocess_mm_multi30k_resnet50(C, prpath, cfgpath):
         
         for name,imagesdir in zip(datasetnames, imagesdirs):
 
-            if split == "TEST" and C.DATASET_NAME != "NONE" and C.DATASET_NAME != name:
+            if split == "TEST" and C.DATASET_NAME is not None and C.DATASET_NAME != name:
                 print("Skipping dataset {}".format(name))
                 continue
 
@@ -82,7 +82,7 @@ def preprocess_mm_multi30k_vinvl(C, prpath, cfgpath):
 
         for name,imagesdir in zip(datasetnames, imagesdirs):
 
-            if split == "TEST" and C.DATASET_NAME != "NONE" and C.DATASET_NAME != name:
+            if split == "TEST" and C.DATASET_NAME is not None and C.DATASET_NAME != name:
                 print("Skipping dataset {}".format(name))
                 continue
 
@@ -105,10 +105,11 @@ def preprocess_mm_multi30k_vinvl(C, prpath, cfgpath):
             run(C, cmd)
 
             cmd = [
-                "python", "{}/src/convert_objdet_output_to_text.py".format(prpath),
+                "python", "{}/src/convert_vinvl_output_to_text.py".format(prpath),
                 "--input-folder", joinpath(cfgpath, featsdir, "npz"),
                 "--file-names", joinpath(cfgpath, featsdir, "npz", name + ".txt"),
-                "--output-file", joinpath(cfgpath, featsdir, "text", name + ".vinvl.en")
+                "--output-file", joinpath(cfgpath, featsdir, "text", name + ".vinvl.en"),
+                "--threshold", str(C.MULTIMODAL.OBJDET_CONF_THRESH)
                 ]
             run(C, cmd)
 
@@ -118,6 +119,64 @@ def preprocess_mm_multi30k_vinvl(C, prpath, cfgpath):
                 joinpath(cfgpath, C.DATASET.BPE_CODES),
                 joinpath(cfgpath, C.DATASET.PATH, "vocab.en"),
                 joinpath(cfgpath, featsdir, "text", name + ".vinvl.en"),
+                joinpath(cfgpath, C.DATASET.PATH, name)
+                ]
+            run(C, cmd)
+
+def preprocess_mm_multi30k_butd(C, prpath, cfgpath):
+    if C.SPLITS == "NONE":
+        raise "Bad split. Options: TRAIN,VALID,TEST"
+
+    for split in C.SPLITS.split("+"):
+        datasetnames = C.DATASET.get(split)
+        imagesdirs = C.MULTIMODAL.RAW_DATA.get(split)
+        featsdir = C.MULTIMODAL.DATA
+
+        for name,imagesdir in zip(datasetnames, imagesdirs):
+
+            print("split:", split, "DATASET_NAME:", C.DATASET_NAME)
+            if split == "TEST" and C.DATASET_NAME is not None and C.DATASET_NAME != name:
+                print("Skipping dataset {}".format(name))
+                continue
+
+            if split in ["TRAIN","VALID"]:
+                sname = split
+            else:
+                sname = name
+
+            cmd = [
+                "python",
+                "{}/src/feats_butd.py".format(prpath),
+                "--mode", C.MULTIMODAL.BUTD.MODE,
+                "--num-cpus", str(C.MULTIMODAL.PREPROCESS.NUM_CPUS),
+                "--gpus", "'{}'".format(C.MULTIMODAL.BUTD.GPUS),
+                "--extract-mode", C.MULTIMODAL.BUTD.EXTRACT_MODE,
+                "--min-max-boxes", "'{},{}'".format(C.MULTIMODAL.BUTD.MIN_BOXES,C.MULTIMODAL.BUTD.MAX_BOXES),
+                "--config-file", joinpath(cfgpath, C.MULTIMODAL.MODEL_PARAMS),                
+                "--image-dir", joinpath(cfgpath, imagesdir),
+                "--file-list", joinpath(cfgpath, C.MULTIMODAL.SPLITS, name + ".txt"),
+                "--output-dir", joinpath(cfgpath, featsdir, "npz", name),
+                "--objects-vocab", joinpath(prpath, "external/bottom-up-attention.pytorch/evaluation/objects_vocab.txt"),
+                "--attributes-vocab", joinpath(prpath, "external/bottom-up-attention.pytorch/evaluation/attributes_vocab.txt"),
+                "MODEL.WEIGHTS", joinpath(cfgpath, C.MULTIMODAL.MODEL_WEIGHTS)
+            ]
+            run(C, cmd)
+
+            cmd = [
+                "python", "{}/src/convert_butd_output_to_text.py".format(prpath),
+                "--input-folder", joinpath(cfgpath, featsdir, "npz"),
+                "--file-names", joinpath(cfgpath, featsdir, "npz", name + ".txt"),
+                "--output-file", joinpath(cfgpath, featsdir, "text", name + ".butd.en"),
+                "--threshold", str(C.MULTIMODAL.OBJDET_CONF_THRESH)
+                ]
+            run(C, cmd)
+
+            cmd = [
+                "bash", "{}/src/process-en/bpe-multi30k-task1.sh".format(prpath),
+                "en", "vb",
+                joinpath(cfgpath, C.DATASET.BPE_CODES),
+                joinpath(cfgpath, C.DATASET.PATH, "vocab.en"),
+                joinpath(cfgpath, featsdir, "text", name + ".butd.en"),
                 joinpath(cfgpath, C.DATASET.PATH, name)
                 ]
             run(C, cmd)
@@ -137,6 +196,9 @@ def main(C):
 
             elif C.MULTIMODAL.TYPE == "vinvl":
                 preprocess_mm_multi30k_vinvl(C, prpath, cfgpath)
+
+            elif C.MULTIMODAL.TYPE == "butd":
+                preprocess_mm_multi30k_butd(C, prpath, cfgpath)
 
             else:
                 print("Unknown mutimodal type.")
@@ -162,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-s", "--split", help="split (none,train,valid,test,train+valid,etc)", type=str, default="none")
     parser.add_argument(
-        "-d", "--dataset-name", help="dataset name", type=str, default="none")
+        "-d", "--dataset-name", help="dataset name", type=str, default=None)
     parser.add_argument(
         "-n", "--dry-run", help="dry run", action="store_true")
     parser.add_argument(

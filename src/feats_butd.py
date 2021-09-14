@@ -9,9 +9,9 @@ import argparse
 import os
 import sys
 import torch
+# import tqdm
 import cv2
 import numpy as np
-sys.path.append('detectron2')
 
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
@@ -22,8 +22,7 @@ from detectron2.evaluation import COCOEvaluator, verify_results
 from detectron2.structures import Instances
 
 from utils.utils import mkdir, save_features
-from utils.extract_utils import get_image_blob, save_bbox, save_roi_features_by_bbox, \
-    save_roi_features
+from utils.extract_utils import get_image_blob, save_bbox, save_roi_features_by_bbox, save_roi_features, save_scores_and_roi_features
 from utils.progress_bar import ProgressBar
 from models import add_config
 from models.bua.box_regression import BUABoxes
@@ -31,87 +30,10 @@ from models.bua.box_regression import BUABoxes
 import ray
 from ray.actor import ActorHandle
 
-import torch
-import numpy as np
-import cv2
-import os
-
-from models.bua.layers.nms import nms
-from models.bua.box_regression import BUABoxes
-
-
-def save_scores_and_roi_features(args, cfg, im_file, im, dataset_dict, boxes, scores, features_pooled, attr_scores=None):
-    MIN_BOXES = cfg.MODEL.BUA.EXTRACTOR.MIN_BOXES
-    MAX_BOXES = cfg.MODEL.BUA.EXTRACTOR.MAX_BOXES
-    CONF_THRESH = cfg.MODEL.BUA.EXTRACTOR.CONF_THRESH
-  
-    dets = boxes[0] / dataset_dict['im_scale']
-    scores = scores[0]
-    feats = features_pooled[0]
-
-    max_conf = torch.zeros((scores.shape[0])).to(scores.device)
-    for cls_ind in range(1, scores.shape[1]):
-            cls_scores = scores[:, cls_ind]
-            keep = nms(dets, cls_scores, 0.3)
-            max_conf[keep] = torch.where(cls_scores[keep] > max_conf[keep],
-                                             cls_scores[keep],
-                                             max_conf[keep])
-
-    keep_boxes = torch.nonzero(max_conf >= CONF_THRESH).flatten()
-    if len(keep_boxes) < MIN_BOXES:
-        keep_boxes = torch.argsort(max_conf, descending=True)[:MIN_BOXES]
-    elif len(keep_boxes) > MAX_BOXES:
-        keep_boxes = torch.argsort(max_conf, descending=True)[:MAX_BOXES]
-    image_feat = feats[keep_boxes]
-    image_bboxes = dets[keep_boxes]
-    image_objects_conf = np.max(scores[keep_boxes].numpy()[:,1:], axis=1)
-    image_objects = np.argmax(scores[keep_boxes].numpy()[:,1:], axis=1)
-    image_scores = scores[keep_boxes]
-
-    output_file = os.path.join(args.output_dir, im_file.split('.')[0])
-
-    if not attr_scores is None:
-        attr_scores = attr_scores[0]
-        image_attr_scores = attr_scores[keep_boxes]
-        image_attrs_conf = np.max(attr_scores[keep_boxes].numpy()[:,1:], axis=1)
-        image_attrs = np.argmax(attr_scores[keep_boxes].numpy()[:,1:], axis=1)
-        info = {
-            'image_id': im_file.split('.')[0],
-            'image_h': np.size(im, 0),
-            'image_w': np.size(im, 1),
-            'num_boxes': len(keep_boxes),
-            'objects_id': image_objects,
-            'objects_conf': image_objects_conf,
-            'attrs_id': image_attrs,
-            'attrs_conf': image_attrs_conf,
-            }
-        np.savez_compressed(
-            output_file, info=info,
-            x=image_feat, bbox=image_bboxes,
-            objects_id=image_objects, objects_conf=image_objects_conf,
-            objects_score=image_scores[:,1:],
-            attrs_id=image_attrs, attrs_conf=image_attrs_conf,
-            attrs_score=image_attr_scores[:,1:],
-            num_bbox=len(keep_boxes), image_h=np.size(im, 0), image_w=np.size(im, 1))
-    else:
-        info = {
-            'image_id': im_file.split('.')[0],
-            'image_h': np.size(im, 0),
-            'image_w': np.size(im, 1),
-            'num_boxes': len(keep_boxes),
-            'objects_id': image_objects,
-            'objects_conf': image_objects_conf
-            }
-        np.savez_compressed(
-            output_file, info=info,
-            x=image_feat, bbox=image_bboxes,
-            objects_id=image_objects, objects_conf=image_objects_conf,
-            objects_score=image_scores[:,1:],
-            num_bbox=len(keep_boxes), image_h=np.size(im, 0), image_w=np.size(im, 1))
-
+from pathlib import Path
 
 def switch_extract_mode(mode):
-    if mode == 'roi_feats':
+    if mode in ['roi_feats','roi_feats_and_confs']:
         switch_cmd = ['MODEL.BUA.EXTRACTOR.MODE', 1]
     elif mode == 'bboxes':
         switch_cmd = ['MODEL.BUA.EXTRACTOR.MODE', 2]
@@ -195,9 +117,15 @@ def extract_feat(split_idx, img_list, cfg, args, actor: ActorHandle):
             features_pooled = [feat.cpu() for feat in features_pooled]
             if not attr_scores is None:
                 attr_scores = [attr_score.cpu() for attr_score in attr_scores]
-            generate_npz(4, 
-                args, cfg, im_file, im, dataset_dict, 
-                boxes, scores, features_pooled, attr_scores)
+
+            if args.extract_mode == "roi_feats":
+                generate_npz(1, args, cfg, im_file, im, dataset_dict, 
+                             boxes, scores, features_pooled, attr_scores)
+            elif args.extract_mode == "roi_feats_and_confs":
+                generate_npz(4, args, cfg, im_file, im, dataset_dict, 
+                             boxes, scores, features_pooled, attr_scores)
+            else:
+                raise(ValueError("args.extract_mode"))
         # extract bbox only
         elif cfg.MODEL.BUA.EXTRACTOR.MODE == 2:
             with torch.set_grad_enabled(False):
@@ -235,74 +163,6 @@ def extract_feat(split_idx, img_list, cfg, args, actor: ActorHandle):
         actor.update.remote(1)
 
 
-def extract_feat_local(split_idx, img_list, cfg, args):
-    num_images = len(img_list)
-    print('Number of images on split{}: {}.'.format(split_idx, num_images))
-
-    model = DefaultTrainer.build_model(cfg)
-    DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
-        cfg.MODEL.WEIGHTS, resume=args.resume
-    )
-    model.eval()
-
-    for im_file in (img_list):
-        if os.path.exists(os.path.join(args.output_dir, im_file.split('.')[0]+'.npz')):
-            continue
-        im = cv2.imread(os.path.join(args.image_dir, im_file))
-        if im is None:
-            print(os.path.join(args.image_dir, im_file), "is illegal!")
-            continue
-        dataset_dict = get_image_blob(im, cfg.MODEL.PIXEL_MEAN)
-        # extract roi features
-        if cfg.MODEL.BUA.EXTRACTOR.MODE == 1:
-            attr_scores = None
-            with torch.set_grad_enabled(False):
-                if cfg.MODEL.BUA.ATTRIBUTE_ON:
-                    boxes, scores, features_pooled, attr_scores = model([dataset_dict])
-                else:
-                    boxes, scores, features_pooled = model([dataset_dict])
-            boxes = [box.tensor.cpu() for box in boxes]
-            scores = [score.cpu() for score in scores]
-            features_pooled = [feat.cpu() for feat in features_pooled]
-            if not attr_scores is None:
-                attr_scores = [attr_score.cpu() for attr_score in attr_scores]
-            generate_npz(1, 
-                args, cfg, im_file, im, dataset_dict, 
-                boxes, scores, features_pooled, attr_scores)
-        # extract bbox only
-        elif cfg.MODEL.BUA.EXTRACTOR.MODE == 2:
-            with torch.set_grad_enabled(False):
-                boxes, scores = model([dataset_dict])
-            boxes = [box.cpu() for box in boxes]
-            scores = [score.cpu() for score in scores]
-            generate_npz(2,
-                args, cfg, im_file, im, dataset_dict, 
-                boxes, scores)
-        # extract roi features by bbox
-        elif cfg.MODEL.BUA.EXTRACTOR.MODE == 3:
-            if not os.path.exists(os.path.join(args.bbox_dir, im_file.split('.')[0]+'.npz')):
-                continue
-            bbox = torch.from_numpy(np.load(os.path.join(args.bbox_dir, im_file.split('.')[0]+'.npz'))['bbox']) * dataset_dict['im_scale']
-            proposals = Instances(dataset_dict['image'].shape[-2:])
-            proposals.proposal_boxes = BUABoxes(bbox)
-            dataset_dict['proposals'] = proposals
-
-            attr_scores = None
-            with torch.set_grad_enabled(False):
-                if cfg.MODEL.BUA.ATTRIBUTE_ON:
-                    boxes, scores, features_pooled, attr_scores = model([dataset_dict])
-                else:
-                    boxes, scores, features_pooled = model([dataset_dict])
-            boxes = [box.tensor.cpu() for box in boxes]
-            scores = [score.cpu() for score in scores]
-            features_pooled = [feat.cpu() for feat in features_pooled]
-            if not attr_scores is None:
-                attr_scores = [attr_score.data.cpu() for attr_score in attr_scores]
-            generate_npz(3, 
-                args, cfg, im_file, im, dataset_dict, 
-                boxes, scores, features_pooled, attr_scores)
-
-
 def main():
     parser = argparse.ArgumentParser(description="PyTorch Object Detection2 Inference")
     parser.add_argument(
@@ -321,25 +181,31 @@ def main():
     parser.add_argument("--mode", default="caffe", type=str, help="bua_caffe, ...")
 
     parser.add_argument('--extract-mode', default='roi_feats', type=str,
-                        help="'roi_feats', 'bboxes' and 'bbox_feats' indicates \
+                        help="'roi_feats', 'bboxes', 'bbox_feats', 'roi_feats_and_confs' indicates \
                         'extract roi features directly', 'extract bboxes only' and \
-                        'extract roi features with pre-computed bboxes' respectively")
+                        'extract roi features with pre-computed bboxes' respectively', 'extract roi features and confidence scores directly'")
 
     parser.add_argument('--min-max-boxes', default='min_max_default', type=str, 
                         help='the number of min-max boxes of extractor')
 
-    parser.add_argument('--out-dir', dest='output_dir',
+    parser.add_argument('--output-dir', dest='output_dir',
                         help='output directory for features',
                         default="features")
     parser.add_argument('--image-dir', dest='image_dir',
                         help='directory with images',
                         default="image")
+
+    parser.add_argument('--file-list', help="list of image file names")    
+
     parser.add_argument('--bbox-dir', dest='bbox_dir',
-                        help='directory with bbox')
+                        help='directory with bbox',
+                        default="bbox")
+
     parser.add_argument('--objects-vocab', dest='objects_vocab',
                         help='file objects vocab')
     parser.add_argument('--attributes-vocab', dest='attributes_vocab',
                         help='file attributes vocab')
+    
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -356,10 +222,12 @@ def main():
 
     cfg = setup(args)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
     num_gpus = len(args.gpu_id.split(','))
+
+    MIN_BOXES = cfg.MODEL.BUA.EXTRACTOR.MIN_BOXES
+    MAX_BOXES = cfg.MODEL.BUA.EXTRACTOR.MAX_BOXES
+    CONF_THRESH = cfg.MODEL.BUA.EXTRACTOR.CONF_THRESH
 
     # Load classes
     classes = [] # ['__background__']
@@ -373,18 +241,39 @@ def main():
         for att in f.readlines():
             attributes.append(att.split(',')[0].lower().strip())
 
-    # Save class and attribute names to file
-    np.savez_compressed(
-        os.path.join(args.output_dir, "info.npz"),
-        classes=classes, attributes=attributes, cfg=cfg, args=args) #info={'cfg':cfg, 'args':args})
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # Extract features.
-    imglist = os.listdir(args.image_dir)
+    imglist = []
+    with Path(args.file_list).open() as f:
+        for fname in f:
+            afname = Path(args.image_dir) / fname.strip()
+            assert afname.exists(), "{} does not exist.".format(afname)
+            imglist.append(fname.strip())
+
     num_images = len(imglist)
     print('Number of images: {}.'.format(num_images))
 
-    extract_feat_local(0, imglist, cfg, args)
-    exit()
+    if num_images == 0:
+        exit()
+
+    npsfile = args.output_dir
+    npsfile = npsfile[:-1] if npsfile.endswith("/") else npsfile
+    base_dir = os.path.basename(npsfile)
+    npsfile = npsfile + ".txt"
+    if os.path.exists(npsfile):
+        print("File exists {}".format(npsfile))
+        exit()
+    fd_list = open(npsfile, "w")
+    for imfile in imglist:
+        ofile = base_dir + "/" + os.path.splitext(imfile)[0] + ".npz\n"
+        fd_list.write(ofile)
+    fd_list.close()
+
+    # Save class and attribute names to file
+    np.savez_compressed(
+        os.path.splitext(npsfile)[0] + "_info.npz",
+        classes=classes, attributes=attributes, cfg=cfg, args=args) #info={'cfg':cfg, 'args':args})
 
     if args.num_cpus != 0:
         ray.init(num_cpus=args.num_cpus)

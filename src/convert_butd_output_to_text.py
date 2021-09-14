@@ -26,6 +26,9 @@ if __name__ == '__main__':
     file_names = Path(args.file_names).expanduser().resolve()
     output_file = Path(args.output_file).expanduser().resolve()
 
+    info = np.load(os.path.splitext(file_names)[0] + "_info.npz", allow_pickle=True)
+    classes = info["classes"]
+
     print("Output folder: %s" % str(output_file.parent))
     os.makedirs(output_file.parent, exist_ok=True)
 
@@ -38,8 +41,13 @@ if __name__ == '__main__':
         for imgname in imglist:        
             input_file = input_folder / (os.path.splitext(imgname)[0] + ".npz")
 
-            d = np.load(input_file)
-            words = np.unique(d["objects"][d["objects_scores"] > args.threshold])
+            d = np.load(input_file, allow_pickle=True)
+
+            o_id = d["info"].item()["objects_id"]
+            o_conf = d["info"].item()["objects_conf"]
+            words = np.unique(classes[o_id[o_conf > args.threshold]])
+            
+            # words = np.unique(classes[d["objects_id"][d["objects_conf"] > args.threshold]])
             sentence = " ".join(words) + "\n"
 
             fd.write(sentence)
